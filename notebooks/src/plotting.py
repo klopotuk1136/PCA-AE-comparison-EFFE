@@ -395,3 +395,79 @@ def _style_log2_x(ax: plt.Axes, grid: list[int]) -> None:
     ax.set_xticklabels(grid)
     ax.set_xlabel("Latent / component size (k)")
     ax.grid(True, alpha=0.3, which="both")
+
+
+# ============================================================================
+# Downstream-prediction comparison plot (src.prediction results).
+# ============================================================================
+def plot_prediction_comparison(
+    experiments: Mapping[str, pd.DataFrame],
+    baselines: Mapping[str, Mapping[str, float]] | None = None,
+    title: str = "Downstream next-step prediction",
+    styles: Mapping[str, Mapping] | None = None,
+    show_train: bool = True,
+    save_path: str | None = None,
+    figsize: tuple = (11, 4.2),
+) -> plt.Figure:
+    """Overlay per-method next-step prediction skill on a two-panel figure.
+
+    Parameters
+    ----------
+    experiments
+        ``{label: results_df}`` where each DataFrame is indexed by k and has the
+        columns produced by src.prediction.run_prediction_experiment
+        (``train_pred_r2`` / ``test_pred_r2`` / ``train_pred_mse`` /
+        ``test_pred_mse``).
+    baselines
+        Optional ``{name: {"test_pred_r2": .., "test_pred_mse": ..}}`` drawn as
+        horizontal reference lines (e.g. the full-X and naive baselines). These
+        are constant in k.
+    show_train
+        Also draw the (dashed) train curves alongside the solid test curves.
+
+    Panels: R^2 vs k (higher = better), and MSE vs k (lower = better).
+    Convention: colour = method, solid+circle = test, dashed+x = train.
+    """
+    if not experiments:
+        raise ValueError("plot_prediction_comparison requires at least one experiment")
+
+    styles = dict(styles) if styles else {}
+    color_iter = iter(DEFAULT_COLOR_CYCLE)
+    resolved_styles = {}
+    for label in experiments:
+        s = dict(styles.get(label, {}))
+        s.setdefault("color", next(color_iter, "black"))
+        resolved_styles[label] = s
+
+    grid = sorted(set().union(*[df.index.tolist() for df in experiments.values()]))
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    for ax, (metric, ylabel, ttl) in zip(
+        axes,
+        [("r2",  "Prediction R^2",            "Next-step R^2 vs k (higher = better)"),
+         ("mse", "Prediction MSE (per elem.)", "Next-step MSE vs k (lower = better)")],
+    ):
+        for label, df in experiments.items():
+            c = resolved_styles[label]["color"]
+            ax.plot(df.index, df[f"test_pred_{metric}"], "-o", color=c, label=f"{label} test")
+            if show_train:
+                ax.plot(df.index, df[f"train_pred_{metric}"], "--x",
+                        color=c, alpha=0.6, label=f"{label} train")
+        # Baselines as horizontal reference lines.
+        for i, (name, vals) in enumerate((baselines or {}).items()):
+            key = f"test_pred_{metric}"
+            if key in vals:
+                ax.axhline(vals[key], color="0.4", lw=1.1,
+                           ls=(":" if i == 0 else "--"), label=f"{name} (test)")
+        if metric == "r2":
+            ax.axhline(0.0, color="black", lw=0.8, alpha=0.5)  # no-skill line
+        ax.set_ylabel(ylabel)
+        ax.set_title(ttl)
+        ax.legend(fontsize=7)
+        _style_log2_x(ax, grid)
+
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    _save(fig, save_path)
+    return fig

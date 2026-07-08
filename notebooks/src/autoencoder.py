@@ -49,6 +49,7 @@ ACTIVATIONS = {
     "sigmoid": nn.Sigmoid,
     "relu":    nn.ReLU,
     "tanh":    nn.Tanh,
+    "leakyrelu": nn.LeakyReLU,
 }
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
