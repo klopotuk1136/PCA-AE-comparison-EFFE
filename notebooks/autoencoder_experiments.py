@@ -55,7 +55,8 @@ from torch import nn
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
-DATA_PATH = r"C:\Users\lenovo\Desktop\UniVie\EFFE\data"
+# DATA_PATH = r"C:\Users\lenovo\Desktop\UniVie\EFFE\data"
+DATA_PATH = r"C:\Users\masha\Data Science\2 semester\EFFE\PCA-AE-comparison-EFFE\data"
 DATA_DIR  = os.path.join(DATA_PATH, "individual_stocks_5yr", "individual_stocks_5yr")
 OUT_DIR   = os.path.dirname(os.path.abspath(__file__))
 

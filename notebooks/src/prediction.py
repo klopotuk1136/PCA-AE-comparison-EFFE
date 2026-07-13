@@ -8,7 +8,8 @@ next day's return vector.
 Protocol (identical across PCA / AE / VAE, so the comparison is fair):
   1. Fit the dimensionality reducer on the TRAIN block only and encode both
      blocks:  Z_train = encode(X_train),  Z_test = encode(X_test).
-     (PCA -> transform; AE -> encoder; VAE -> posterior mean mu.)
+     (PCA -> transform; AE -> encoder; VAE -> posterior mean mu;
+      VAE-t -> posterior location loc.)
   2. Build one-step supervised pairs WITHIN each block:
         features = Z_t          (the current latent)
         target   = X_{t+1}      (the NEXT input vector)      <- target='input'
@@ -48,6 +49,7 @@ from src.pca import COMPONENT_GRID
 from src.data import VAL_FRAC
 from src import autoencoder as ae_mod
 from src import vae as vae_mod
+from src import vae_tstudent as vaet_mod
 
 
 # ----------------------------------------------------------------------------
@@ -216,10 +218,29 @@ def vae_latents(data: dict, k: int, **kw) -> tuple[np.ndarray, np.ndarray]:
     return mu_tr.cpu().numpy(), mu_te.cpu().numpy()
 
 
+def vaet_latents(data: dict, k: int, **kw) -> tuple[np.ndarray, np.ndarray]:
+    model = vaet_mod.train_vae_tstudent(
+        data["X_fit"], data["X_val"], data["d"], k,
+        encoder_hidden=kw.get("encoder_hidden", vaet_mod.DEFAULT_ENCODER_HIDDEN),
+        decoder_hidden=kw.get("decoder_hidden", vaet_mod.DEFAULT_DECODER_HIDDEN),
+        activation=kw.get("activation", vaet_mod.DEFAULT_ACTIVATION),
+        beta=kw.get("beta", vaet_mod.DEFAULT_BETA),
+        nu=kw.get("nu", vaet_mod.DEFAULT_NU),
+        learn_nu=kw.get("learn_nu", vaet_mod.DEFAULT_LEARN_NU),
+        seed=kw.get("seed", vaet_mod.SEED),
+    )
+    model.eval()
+    with torch.no_grad():
+        loc_tr, _ = model.encode(torch.as_tensor(data["X_train"], dtype=torch.float32, device=DEVICE))
+        loc_te, _ = model.encode(torch.as_tensor(data["X_test"],  dtype=torch.float32, device=DEVICE))
+    return loc_tr.cpu().numpy(), loc_te.cpu().numpy()
+
+
 LATENT_PROVIDERS: dict[str, Callable] = {
-    "PCA": pca_latents,
-    "AE":  ae_latents,
-    "VAE": vae_latents,
+    "PCA":   pca_latents,
+    "AE":    ae_latents,
+    "VAE":   vae_latents,
+    "VAE-t": vaet_latents,
 }
 
 
