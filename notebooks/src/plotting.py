@@ -356,7 +356,6 @@ def plot_experiments_comparison(
                     color=c, alpha=0.6, label=f"{label} train")
     ax.set_ylabel("Preserved variance")
     ax.set_title("Preserved variance vs k")
-    ax.legend(fontsize=8)
     _style_log2_x(ax, grid)
 
     # Panel 2 -- residual entropy (single value per k, no train/test split)
@@ -366,7 +365,6 @@ def plot_experiments_comparison(
                 color=resolved_styles[label]["color"], label=label)
     ax.set_ylabel("Residual entropy (nats, Gaussian approx.)")
     ax.set_title("Residual entropy vs k")
-    ax.legend(fontsize=8)
     _style_log2_x(ax, grid)
 
     # Panel 3 -- reconstruction MSE (train + test, log y)
@@ -380,11 +378,15 @@ def plot_experiments_comparison(
     ax.set_yscale("log")
     ax.set_ylabel("Reconstruction MSE (log scale)")
     ax.set_title("Reconstruction MSE vs k")
-    ax.legend(fontsize=8)
     _style_log2_x(ax, grid)
 
     fig.suptitle(title, fontsize=13)
     fig.tight_layout()
+    # One shared legend for the whole figure (panels 1 & 3 share it exactly;
+    # panel 2 uses the same method colours), placed below so it never overlaps.
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.0),
+               ncol=4, fontsize=8, framealpha=0.9)
     _save(fig, save_path)
     return fig
 
@@ -464,10 +466,13 @@ def plot_prediction_comparison(
             ax.axhline(0.0, color="black", lw=0.8, alpha=0.5)  # no-skill line
         ax.set_ylabel(ylabel)
         ax.set_title(ttl)
-        ax.legend(fontsize=7)
         _style_log2_x(ax, grid)
 
     fig.suptitle(title, fontsize=13)
     fig.tight_layout()
+    # One shared legend for both panels (their per-panel legends are identical).
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.0),
+               ncol=5, fontsize=7, framealpha=0.9)
     _save(fig, save_path)
     return fig

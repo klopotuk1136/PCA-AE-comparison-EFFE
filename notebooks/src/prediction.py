@@ -1,36 +1,42 @@
-"""Downstream-usefulness experiment: next-step forecasting from the latent code.
+"""Downstream-usefulness experiment: h-day-ahead forecasting from the latent code.
 
 The reconstruction experiments (src.pca / src.autoencoder / src.vae) measure how
 much of X each method can *rebuild*. This module measures something different:
 how *useful* the captured information is for a downstream task -- predicting the
-next day's return vector.
+return vector at a horizon of h CALENDAR days ahead.
 
-Protocol (identical across PCA / AE / VAE, so the comparison is fair):
+Protocol (identical across PCA / AE / VAE / VAE-t, so the comparison is fair):
   1. Fit the dimensionality reducer on the TRAIN block only and encode both
      blocks:  Z_train = encode(X_train),  Z_test = encode(X_test).
      (PCA -> transform; AE -> encoder; VAE -> posterior mean mu;
       VAE-t -> posterior location loc.)
-  2. Build one-step supervised pairs WITHIN each block:
-        features = Z_t          (the current latent)
-        target   = X_{t+1}      (the NEXT input vector)      <- target='input'
-     Predicting the next *input* (not the next latent) keeps the target
-     identical for every method, so the input-space error is directly
-     comparable and is not confounded by each method's decoder.
+  2. Build supervised pairs WITHIN each block at a horizon of h CALENDAR days:
+        features = Z_t                    (the current latent)
+        target   = X_{t+h}   where day t+h is the FIRST trading day on/after
+                   date(t) + h calendar days (a single day, target='input').
+     Because trading days skip weekends/holidays, the horizon is resolved on the
+     actual date index (see calendar_pairs), not by a fixed row offset. h=1
+     reproduces the next-trading-day target. Predicting the *input* (not the next
+     latent) keeps the target identical for every method, so the input-space
+     error is directly comparable and is not confounded by each method's decoder.
   3. Train a small predictor (linear probe or MLP) on the train pairs,
-     early-stopping on a time-ordered validation slice, and evaluate on the
+     early-stopping on a time-ordered validation slice (with an h-day embargo so
+     no target day leaks in as a validation feature day), and evaluate on the
      test pairs.
 
 Reported per k (indexed DataFrame):
-    train_pred_mse, test_pred_mse   per-element MSE of the next-step prediction
+    train_pred_mse, test_pred_mse   per-element MSE of the h-day-ahead prediction
     train_pred_r2,  test_pred_r2    R^2 against the block mean
 
 Baselines for context (constant in k, drawn as reference lines):
-    full-X   an uncompressed predictor X_t -> X_{t+1} (the k = d reference)
+    full-X   an uncompressed predictor X_t -> X_{t+h} (the k = d reference)
     naive    predict the train target mean (the "no skill" R^2 = 0 line)
 
 NOTE: daily log returns are close to unpredictable in the conditional mean
 (efficient market), so absolute R^2 will be small for every method. The point
 is the RELATIVE ranking of the methods and how it moves with the latent size k.
+Absolute MSE/R^2 are NOT comparable ACROSS horizons (the target variance grows
+with h) -- read the method ranking within each horizon.
 """
 
 from __future__ import annotations
@@ -55,7 +61,7 @@ from src import vae_tstudent as vaet_mod
 # ----------------------------------------------------------------------------
 # Constants -- change these to alter the predictor / training.
 # ----------------------------------------------------------------------------
-HORIZON = 1                 # predict this many steps ahead
+HORIZON = 1                 # default forecast horizon, in CALENDAR days (see calendar_pairs)
 
 PRED_HIDDEN     = [64]      # predictor hidden sizes; [] == a plain linear probe
 PRED_ACTIVATION = "relu"    # key into src.autoencoder.ACTIVATIONS (MLP only)
@@ -110,8 +116,28 @@ def predictor_label(hidden: Sequence[int]) -> str:
 # Supervised pairs + training
 # ----------------------------------------------------------------------------
 def make_pairs(features: np.ndarray, targets: np.ndarray, horizon: int = HORIZON):
-    """(features_t, targets_{t+horizon}) built WITHIN a single contiguous block."""
+    """(features_t, targets_{t+horizon}) by a fixed ROW offset, within a single
+    contiguous block. Kept as a simple utility; the experiments use the
+    calendar-aware calendar_pairs below instead."""
     return features[:-horizon], targets[horizon:]
+
+
+def calendar_pairs(dates, horizon_days: int) -> tuple[np.ndarray, np.ndarray]:
+    """Index pairs (feat_idx, tgt_idx) where day tgt is the FIRST trading day
+    on/after date(feat) + horizon_days CALENDAR days, WITHIN one contiguous block.
+
+    `dates` is the block's ascending DatetimeIndex (or datetime64 array). Rows
+    whose target date falls past the end of the block are dropped, so both
+    returned arrays have the same (<= len(dates)) length. Because the target date
+    is strictly later than the feature date (horizon_days >= 1), tgt_idx > feat_idx
+    always, i.e. pairs never look backwards.
+    """
+    d = np.asarray(dates, dtype="datetime64[D]")
+    target = d + np.timedelta64(int(horizon_days), "D")
+    j = np.searchsorted(d, target, side="left")     # first row with date >= target
+    n = d.shape[0]
+    valid = j < n                                    # target exists within the block
+    return np.arange(n)[valid], j[valid]
 
 
 def train_predictor(
@@ -250,8 +276,10 @@ LATENT_PROVIDERS: dict[str, Callable] = {
 def _score_predictor(
     Z_train: np.ndarray, Z_test: np.ndarray,
     data: dict, hidden: Sequence[int], activation: str, seed: int,
+    horizon: int = HORIZON,
 ) -> dict:
-    """Build next-input pairs from the latents, train, and return metrics."""
+    """Build (z_t -> X_{t+h}) pairs from the latents (h CALENDAR days, resolved on
+    the date index), train a predictor, and return metrics."""
     X_train, X_test = data["X_train"], data["X_test"]
 
     # Standardise the latent FEATURES using train-block statistics. PCA scores
@@ -266,14 +294,23 @@ def _score_predictor(
     Z_train = (Z_train - mu) / sd
     Z_test  = (Z_test  - mu) / sd
 
-    # One-step pairs, built within each block (never straddling the split).
-    Ztr, Ytr = make_pairs(Z_train, X_train, HORIZON)
-    Zte, Yte = make_pairs(Z_test,  X_test,  HORIZON)
+    # Calendar-aligned pairs, built within each block (never straddling the split).
+    fi_tr, tj_tr = calendar_pairs(data["dates_train"], horizon)
+    fi_te, tj_te = calendar_pairs(data["dates_test"],  horizon)
+    Ztr, Ytr = Z_train[fi_tr], X_train[tj_tr]
+    Zte, Yte = Z_test[fi_te],  X_test[tj_te]
 
-    # Time-ordered validation slice from the tail of the train pairs.
-    n_val = max(1, int(round(VAL_FRAC * Ztr.shape[0])))
-    Zf, Yf = Ztr[:-n_val], Ytr[:-n_val]
-    Zv, Yv = Ztr[-n_val:], Ytr[-n_val:]
+    # Time-ordered validation slice from the tail of the train pairs. Embargo:
+    # drop fit pairs whose target day reaches into the validation feature span,
+    # so no single target day leaks in as a validation feature day (matters at
+    # long horizons, where feature t and target t+h are many rows apart).
+    n_pairs = Ztr.shape[0]
+    n_val = max(1, int(round(VAL_FRAC * n_pairs)))
+    val_start = n_pairs - n_val
+    val_feat_start = fi_tr[val_start]                    # feature row-index of first val pair
+    fit_keep = tj_tr[:val_start] < val_feat_start        # embargo mask on the fit pairs
+    Zf, Yf = Ztr[:val_start][fit_keep], Ytr[:val_start][fit_keep]
+    Zv, Yv = Ztr[val_start:], Ytr[val_start:]
 
     model = train_predictor(Zf, Yf, Zv, Yv, hidden=hidden, activation=activation, seed=seed)
 
@@ -295,14 +332,16 @@ def run_prediction_experiment(
     hidden: Sequence[int] = PRED_HIDDEN,
     activation: str = PRED_ACTIVATION,
     encoder_kwargs: dict | None = None,
+    horizon: int = HORIZON,
     seed: int = PRED_SEED,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Sweep one method across component_grid, returning a results DataFrame
-    indexed by k. `method` is a key into LATENT_PROVIDERS ('PCA'|'AE'|'VAE').
+    indexed by k. `method` is a key into LATENT_PROVIDERS ('PCA'|'AE'|'VAE'|'VAE-t').
 
-    `encoder_kwargs` is forwarded to the AE / VAE trainer (encoder_hidden,
-    decoder_hidden, activation, beta, ...); ignored for PCA.
+    `horizon` is the forecast horizon in CALENDAR days. `encoder_kwargs` is
+    forwarded to the AE / VAE / VAE-t trainer (encoder_hidden, decoder_hidden,
+    activation, beta, nu, ...); ignored for PCA.
     """
     provider = LATENT_PROVIDERS[method]
     encoder_kwargs = encoder_kwargs or {}
@@ -311,9 +350,9 @@ def run_prediction_experiment(
     rows = []
     for k in component_grid:
         Z_train, Z_test = provider(data, k, **encoder_kwargs)
-        m = _score_predictor(Z_train, Z_test, data, hidden, activation, seed)
+        m = _score_predictor(Z_train, Z_test, data, hidden, activation, seed, horizon)
         if verbose:
-            print(f"[predict/{method}/{tag}] k={k:>3}  "
+            print(f"[predict/{method}/h={horizon}/{tag}] k={k:>3}  "
                   f"test R^2={m['test_pred_r2']:+.4f}  test MSE={m['test_pred_mse']:.4f}")
         rows.append({"k": k, **m})
 
@@ -327,28 +366,39 @@ def run_prediction_experiment_multi(
     hidden_list: Sequence[Sequence[int]] = ([], PRED_HIDDEN),
     activation: str = PRED_ACTIVATION,
     encoder_kwargs: dict | None = None,
+    horizons: Sequence[int] = (HORIZON,),
     seed: int = PRED_SEED,
     verbose: bool = True,
-) -> dict[str, pd.DataFrame]:
-    """Like run_prediction_experiment, but scores SEVERAL predictors while
-    encoding only ONCE per k (the encoder is the expensive part). Returns
-    ``{predictor_label: results_df}`` -- e.g. {'linear': df, 'mlp[64]': df}.
+) -> dict[int, dict[str, pd.DataFrame]]:
+    """Like run_prediction_experiment, but encodes only ONCE per k (the encoder is
+    the expensive part) and reuses those latents to score every (horizon x
+    predictor) combination.
+
+    Returns a NESTED dict ``{horizon: {predictor_label: results_df}}`` -- e.g.
+    ``{1: {'linear': df, 'mlp[64]': df}, 7: {...}, 30: {...}}``. The encoder does
+    not depend on the horizon, so all horizons share the same per-k encoding.
     """
     provider = LATENT_PROVIDERS[method]
     encoder_kwargs = encoder_kwargs or {}
-    rows: dict[str, list] = {predictor_label(list(h)): [] for h in hidden_list}
+    rows: dict[int, dict[str, list]] = {
+        h: {predictor_label(list(hd)): [] for hd in hidden_list} for h in horizons
+    }
 
     for k in component_grid:
-        Z_train, Z_test = provider(data, k, **encoder_kwargs)   # encode once
-        for h in hidden_list:
-            tag = predictor_label(list(h))
-            m = _score_predictor(Z_train, Z_test, data, list(h), activation, seed)
-            if verbose:
-                print(f"[predict/{method}/{tag}] k={k:>3}  "
-                      f"test R^2={m['test_pred_r2']:+.4f}  test MSE={m['test_pred_mse']:.4f}")
-            rows[tag].append({"k": k, **m})
+        Z_train, Z_test = provider(data, k, **encoder_kwargs)   # encode once per k
+        for horizon in horizons:
+            for hd in hidden_list:
+                tag = predictor_label(list(hd))
+                m = _score_predictor(Z_train, Z_test, data, list(hd), activation, seed, horizon)
+                if verbose:
+                    print(f"[predict/{method}/h={horizon}/{tag}] k={k:>3}  "
+                          f"test R^2={m['test_pred_r2']:+.4f}  test MSE={m['test_pred_mse']:.4f}")
+                rows[horizon][tag].append({"k": k, **m})
 
-    return {tag: pd.DataFrame(r).set_index("k") for tag, r in rows.items()}
+    return {
+        h: {tag: pd.DataFrame(r).set_index("k") for tag, r in per_h.items()}
+        for h, per_h in rows.items()
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -358,17 +408,19 @@ def full_x_baseline(
     data: dict,
     hidden: Sequence[int] = PRED_HIDDEN,
     activation: str = PRED_ACTIVATION,
+    horizon: int = HORIZON,
     seed: int = PRED_SEED,
 ) -> dict:
-    """Uncompressed reference: predict X_{t+1} from the full X_t (no encoder)."""
-    return _score_predictor(data["X_train"], data["X_test"], data, hidden, activation, seed)
+    """Uncompressed reference: predict X_{t+h} from the full X_t (no encoder)."""
+    return _score_predictor(data["X_train"], data["X_test"], data, hidden, activation, seed, horizon)
 
 
-def naive_baseline(data: dict) -> dict:
+def naive_baseline(data: dict, horizon: int = HORIZON) -> dict:
     """No-skill reference: predict the train target mean for every test row."""
     X_train, X_test = data["X_train"], data["X_test"]
-    _, Ytr = make_pairs(X_train, X_train, HORIZON)
-    _, Yte = make_pairs(X_test,  X_test,  HORIZON)
+    _, tj_tr = calendar_pairs(data["dates_train"], horizon)
+    _, tj_te = calendar_pairs(data["dates_test"],  horizon)
+    Ytr, Yte = X_train[tj_tr], X_test[tj_te]
     mean_pred_tr = np.repeat(Ytr.mean(axis=0, keepdims=True), Ytr.shape[0], axis=0)
     mean_pred_te = np.repeat(Ytr.mean(axis=0, keepdims=True), Yte.shape[0], axis=0)
     train_mse, train_r2 = _mse_r2(Ytr, mean_pred_tr)

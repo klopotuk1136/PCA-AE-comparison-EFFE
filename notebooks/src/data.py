@@ -70,6 +70,7 @@ def prepare_data(
         ss_tot_train, ss_tot_test sum-of-squares totals for R^2-style metrics
         d                        number of stocks
         mu, sigma                train-only column statistics used to standardise
+        dates_train, dates_test  DatetimeIndex of each block's rows (horizon alignment)
         log_returns              the underlying DataFrame (handy for plotting)
     """
     if log_returns is None:
@@ -100,5 +101,7 @@ def prepare_data(
         "d":            X_train.shape[1],
         "mu":           mu,
         "sigma":        sigma,
+        "dates_train":  log_returns.index[:n_train],
+        "dates_test":   log_returns.index[n_train:],
         "log_returns":  log_returns,
     }
