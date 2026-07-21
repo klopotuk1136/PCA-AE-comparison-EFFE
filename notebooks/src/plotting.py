@@ -280,7 +280,7 @@ def plot_summary_stats(
         ax.set_ylabel("Number of stocks")
         ax.legend(fontsize=8)
 
-    fig.suptitle("Distribution of Per-Stock Return Statistics (all complete stocks)", fontsize=11)
+    fig.suptitle("Distribution of Per-Stock Return Statistics (470 stocks)", fontsize=11)
     fig.tight_layout()
     _save(fig, save_path)
     return fig
